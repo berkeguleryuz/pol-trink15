@@ -74,7 +74,7 @@ const CONFIG = {
   pollIntervalMs: 500,        // Her 500ms'de fiyat kontrol
 
   // Target markets
-  targetCryptos: ['btc', 'eth', 'sol'],
+  targetCryptos: ['btc', 'eth', 'sol', 'xrp'],
 
   // Mode
   dryRun: !process.argv.includes('--live'),
@@ -117,6 +117,11 @@ interface MarketState {
   totalSpent: number;
   currentSide: 'Up' | 'Down' | null;
   shares: number;
+  // Real asset prices from Polymarket/Chainlink
+  eventStartTime: string;        // ISO format: "2026-01-29T13:45:00Z"
+  priceToBeat: number;           // openPrice - hedef fiyat
+  currentAssetPrice: number;     // closePrice - anlık fiyat
+  lastPriceUpdate: number;       // Son fiyat güncellemesi timestamp
 }
 
 function getTime(): string {
@@ -328,6 +333,9 @@ class SniperBotClob {
 
           if (!upTokenId || !downTokenId) continue;
 
+          // eventStartTime'ı al (15 dakikalık periyodun başlangıcı)
+          const eventStartTime = market.eventStartTime || '';
+
           this.markets.set(slug, {
             slug,
             title: market.question || market.groupItemTitle,
@@ -342,7 +350,12 @@ class SniperBotClob {
             lastTradeTime: 0,
             totalSpent: 0,
             currentSide: null,
-            shares: 0
+            shares: 0,
+            // Real asset prices
+            eventStartTime,
+            priceToBeat: 0,
+            currentAssetPrice: 0,
+            lastPriceUpdate: 0
           });
 
           const remainingSec = Math.floor((endTime - now) / 1000);
@@ -350,6 +363,9 @@ class SniperBotClob {
           const timeRange = timeMatch ? `${timeMatch[1]} ${timeMatch[2]}-${timeMatch[3]}` : '';
 
           console.log(`[${getTime()}] ${C.green}✅ ${crypto.toUpperCase()}${C.reset}: ${timeRange} | ${remainingSec}s left`);
+
+          // İlk crypto fiyatlarını çek
+          this.fetchCryptoPrices(slug).catch(() => {});
 
           foundMarket = true;
         } catch {
@@ -364,6 +380,57 @@ class SniperBotClob {
         console.log(`[${getTime()}] ${C.dim}🗑️ Expired: ${market.coin}${C.reset}`);
         this.markets.delete(slug);
       }
+    }
+  }
+
+  /**
+   * Fetch real crypto prices (Price to Beat & Current Price) from Polymarket page
+   * Polymarket sayfasından __NEXT_DATA__ JSON'ını parse ederek gerçek fiyatları alır
+   */
+  private async fetchCryptoPrices(slug: string): Promise<void> {
+    const market = this.markets.get(slug);
+    if (!market) return;
+
+    try {
+      // Polymarket event sayfasını fetch et
+      const url = `https://polymarket.com/event/${slug}`;
+      const response = await axios.get(url, {
+        timeout: 10000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+      });
+
+      // __NEXT_DATA__ JSON'ını parse et
+      const html = response.data;
+      const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([^<]+)<\/script>/);
+      if (!match) return;
+
+      const nextData = JSON.parse(match[1]);
+      const queries = nextData?.props?.pageProps?.dehydratedState?.queries || [];
+
+      // crypto-prices query'sini bul (openPrice ve closePrice içeren)
+      for (const query of queries) {
+        const queryKey = query.queryKey || [];
+        // ['crypto-prices', 'price', 'BTC', '2026-01-29T13:45:00Z', 'fifteen', '2026-01-29T14:00:00Z']
+        if (queryKey[0] === 'crypto-prices' && queryKey[1] === 'price') {
+          const data = query.state?.data;
+          if (data && typeof data.openPrice === 'number' && typeof data.closePrice === 'number') {
+            market.priceToBeat = data.openPrice;
+            market.currentAssetPrice = data.closePrice;
+            market.lastPriceUpdate = Date.now();
+
+            const diff = market.currentAssetPrice - market.priceToBeat;
+            const diffStr = diff >= 0 ? `+$${diff.toFixed(2)}` : `-$${Math.abs(diff).toFixed(2)}`;
+            const color = diff >= 0 ? C.green : C.red;
+
+            console.log(`[${getTime()}] ${C.cyan}💰 ${market.coin}${C.reset} Target: $${market.priceToBeat.toFixed(2)} | Current: ${color}$${market.currentAssetPrice.toFixed(2)}${C.reset} (${diffStr})`);
+            break;
+          }
+        }
+      }
+    } catch (err: any) {
+      // Silently fail - will retry on next poll
     }
   }
 
