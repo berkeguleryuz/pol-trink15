@@ -14,9 +14,11 @@ build/
 *.tsbuildinfo
 
 # Logs
-logs/
-data/
+/logs/
 *.log
+
+# Data folder (whale debug logs etc.) - sadece root data klasörü
+/data/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
