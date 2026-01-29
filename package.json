@@ -32,7 +32,8 @@
     "claim:gasless": "ts-node src_new/scripts/claim-gasless.ts",
     "claim:gasless:run": "ts-node src_new/scripts/claim-gasless.ts --claim",
     "test:prices": "ts-node src_new/scripts/test-crypto-prices.ts",
-    "test:ws": "ts-node src_new/scripts/test-ws-prices.ts"
+    "test:ws": "ts-node src_new/scripts/test-ws-prices.ts",
+    "whale:debug": "ts-node src_new/scripts/whale-strategy-debug.ts"
   },
   "keywords": [
     "polymarket",

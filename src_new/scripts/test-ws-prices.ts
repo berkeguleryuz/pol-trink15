@@ -43,36 +43,55 @@ const marketPrices: Map<string, MarketInfo> = new Map();
 const currentPrices: Map<string, CryptoPrice> = new Map();
 
 /**
- * Polymarket sayfasından Price to Beat'i al (bir kez)
+ * Polymarket sayfasından Price to Beat'i al (retry ile)
  */
-async function fetchPriceToBeat(slug: string, coin: string): Promise<number> {
-  try {
-    const url = `https://polymarket.com/event/${slug}`;
-    const response = await axios.get(url, {
-      timeout: 10000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+async function fetchPriceToBeat(slug: string, coin: string, retries: number = 3): Promise<number> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      // Her attempt arasında bekle
+      if (attempt > 1) {
+        await new Promise(r => setTimeout(r, 2000));
       }
-    });
 
-    const html = response.data;
-    const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([^<]+)<\/script>/);
-    if (!match) return 0;
+      const url = `https://polymarket.com/event/${slug}`;
+      const response = await axios.get(url, {
+        timeout: 15000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Accept-Language': 'en-US,en;q=0.9'
+        }
+      });
 
-    const nextData = JSON.parse(match[1]);
-    const queries = nextData?.props?.pageProps?.dehydratedState?.queries || [];
+      const html = response.data;
+      const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([^<]+)<\/script>/);
+      if (!match) {
+        if (attempt < retries) continue;
+        return 0;
+      }
 
-    for (const query of queries) {
-      const queryKey = query.queryKey || [];
-      if (queryKey[0] === 'crypto-prices' && queryKey[1] === 'price') {
-        const data = query.state?.data;
-        if (data && typeof data.openPrice === 'number') {
-          return data.openPrice;
+      const nextData = JSON.parse(match[1]);
+      const queries = nextData?.props?.pageProps?.dehydratedState?.queries || [];
+
+      for (const query of queries) {
+        const queryKey = query.queryKey || [];
+        if (queryKey[0] === 'crypto-prices' && queryKey[1] === 'price') {
+          const data = query.state?.data;
+          if (data && typeof data.openPrice === 'number' && data.openPrice > 0) {
+            return data.openPrice;
+          }
         }
       }
+
+      // openPrice bulunamadı, retry
+      if (attempt < retries) {
+        console.log(`${C.dim}   ⏳ ${coin} retry ${attempt}/${retries}...${C.reset}`);
+      }
+    } catch (err) {
+      if (attempt === retries) {
+        console.log(`${C.red}❌ ${coin} Price to Beat fetch hatası${C.reset}`);
+      }
     }
-  } catch (err) {
-    console.log(`${C.red}❌ Price to Beat fetch hatası: ${coin}${C.reset}`);
   }
   return 0;
 }
