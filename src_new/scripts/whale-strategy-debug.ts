@@ -76,6 +76,7 @@ interface MarketState {
   endTime: number;
   priceToBeat: number;
   eventStartTime: string;
+  isSelfCaptured?: boolean;  // Polymarket'ten değil, Chainlink'ten alındı mı?
 }
 
 interface PriceState {
@@ -187,7 +188,7 @@ function logToFile(message: string, periodSlug?: string): void {
 }
 
 function getTime(): string {
-  return new Date().toLocaleTimeString('tr-TR', { hour12: false, timeZone: 'Europe/Istanbul' });
+  return new Date().toLocaleTimeString('de-DE', { hour12: false, timeZone: 'Europe/Berlin' });
 }
 
 // ============================================================================
@@ -252,9 +253,10 @@ async function discoverMarkets(): Promise<void> {
   ];
 
   for (const crypto of CONFIG.cryptos) {
-    // Skip if already have active market WITH valid priceToBeat
+    // Skip if already have active market WITH valid priceToBeat (and NOT self-captured)
     const existing = markets.get(crypto.toUpperCase());
-    if (existing && existing.endTime > now && existing.priceToBeat > 0) continue;
+    const needsRealPrice = existing?.isSelfCaptured === true;  // Self-captured ise gerçek değeri ara
+    if (existing && existing.endTime > now && existing.priceToBeat > 0 && !needsRealPrice) continue;
 
     for (const ts of timestamps) {
       const slug = `${crypto}-updown-15m-${ts}`;
@@ -278,8 +280,27 @@ async function discoverMarkets(): Promise<void> {
 
         if (!upTokenId || !downTokenId) continue;
 
-        const priceToBeat = await fetchPriceToBeat(slug, crypto.toUpperCase());
+        let priceToBeat = await fetchPriceToBeat(slug, crypto.toUpperCase());
         const remainingSec = Math.floor((endTime - now) / 1000);
+
+        // Eğer Polymarket'ten alamadıysak, self-captured kullan (geçici)
+        let usedSelfCaptured = false;
+        if (priceToBeat === 0) {
+          const selfCaptured = selfCapturedPrices.get(crypto.toUpperCase());
+          if (selfCaptured && selfCaptured > 0) {
+            priceToBeat = selfCaptured;
+            usedSelfCaptured = true;
+            console.log(`${C.yellow}⚡ ${crypto.toUpperCase()} self-captured kullanılıyor: $${priceToBeat.toFixed(crypto === 'btc' || crypto === 'eth' ? 2 : 4)} (Polymarket henüz hazır değil)${C.reset}`);
+          }
+        }
+
+        // Eğer daha önce self-captured iken şimdi gerçek değer geldiyse, güncelle
+        const existingMarket = markets.get(crypto.toUpperCase());
+        if (existingMarket?.isSelfCaptured && !usedSelfCaptured && priceToBeat > 0) {
+          const oldPrice = existingMarket.priceToBeat;
+          const diff = Math.abs(priceToBeat - oldPrice);
+          console.log(`${C.green}🔄 ${crypto.toUpperCase()} gerçek priceToBeat geldi: $${priceToBeat.toFixed(crypto === 'btc' || crypto === 'eth' ? 2 : 4)} (self-captured: $${oldPrice.toFixed(crypto === 'btc' || crypto === 'eth' ? 2 : 4)}, fark: $${diff.toFixed(4)})${C.reset}`);
+        }
 
         markets.set(crypto.toUpperCase(), {
           slug,
@@ -288,11 +309,14 @@ async function discoverMarkets(): Promise<void> {
           downTokenId,
           endTime,
           priceToBeat,
-          eventStartTime: market.eventStartTime || ''
+          eventStartTime: market.eventStartTime || '',
+          isSelfCaptured: usedSelfCaptured
         });
 
-        console.log(`${C.green}✅ ${crypto.toUpperCase()}${C.reset}: Target=$${priceToBeat.toFixed(2)} | ${remainingSec}s`);
-        logToFile(`MARKET: ${crypto.toUpperCase()} slug=${slug} target=$${priceToBeat.toFixed(2)} endTime=${endTime}`);
+        const priceDisplay = crypto === 'btc' || crypto === 'eth' ? priceToBeat.toFixed(2) : priceToBeat.toFixed(4);
+        const sourceTag = usedSelfCaptured ? ' (self-captured)' : '';
+        console.log(`${C.green}✅ ${crypto.toUpperCase()}${C.reset}: Target=$${priceDisplay}${sourceTag} | ${remainingSec}s`);
+        logToFile(`MARKET: ${crypto.toUpperCase()} slug=${slug} target=$${priceToBeat.toFixed(6)} endTime=${endTime} selfCaptured=${usedSelfCaptured}`);
         break;
       } catch { }
     }
@@ -922,6 +946,24 @@ function printStatus(): void {
 
   let statusLine = `[${time}] `;
 
+  // Period geçişi kontrolü - her 15 dakikada bir
+  const currentPeriodTs = Math.floor(now / (15 * 60 * 1000)) * (15 * 60 * 1000);
+  if (currentPeriodTs !== lastPeriodTimestamp) {
+    // Yeni period başladı! Chainlink fiyatlarını yakala
+    for (const coin of CONFIG.cryptos.map(c => c.toUpperCase())) {
+      const chainlinkPrice = chainlinkPrices.get(coin) || lastKnownChainlinkPrices.get(coin) || 0;
+      if (chainlinkPrice > 0) {
+        selfCapturedPrices.set(coin, chainlinkPrice);
+        console.log(`${C.cyan}📸 ${coin} self-captured priceToBeat: $${chainlinkPrice.toFixed(coin === 'BTC' || coin === 'ETH' ? 2 : 4)}${C.reset}`);
+      }
+    }
+    lastPeriodTimestamp = currentPeriodTs;
+
+    // Eski marketleri temizle, yeni period için hemen keşif başlat
+    markets.clear();
+    discoverMarkets();
+  }
+
   for (const coin of CONFIG.cryptos.map(c => c.toUpperCase())) {
     const market = markets.get(coin);
     const chainlink = chainlinkPrices.get(coin) || 0;
@@ -1029,6 +1071,10 @@ async function main() {
 
   // Son işlemleri çek
   await fetchRecentTrades();
+
+  // lastPeriodTimestamp'ı başlat (ilk çalıştırmada gereksiz self-capture tetiklenmemesi için)
+  const now = Date.now();
+  lastPeriodTimestamp = Math.floor(now / (15 * 60 * 1000)) * (15 * 60 * 1000);
 
   // Marketleri keşfet
   console.log(`${C.bold}📊 Marketler keşfediliyor...${C.reset}\n`);

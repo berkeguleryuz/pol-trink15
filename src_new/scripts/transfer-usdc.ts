@@ -26,7 +26,7 @@ const ERC20_ABI = [
 ];
 
 // Polygon RPC endpoints
-const RPC_URLS = ["https://polygon-rpc.com", process.env.RPC_URL].filter(
+const RPC_URLS = ["https://polygon-bor-rpc.publicnode.com", process.env.RPC_URL].filter(
   Boolean,
 ) as string[];
 
